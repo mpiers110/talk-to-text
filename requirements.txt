@@ -1,0 +1,6 @@
+fastapi
+python-dotenv
+uvicorn[standard]
+google-cloud-speech
+google-genai[asyncio]
+python-multipart

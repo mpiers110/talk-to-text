@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Medical Transcription</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body class="bg-slate-50 min-h-screen p-8">
+    <div class="max-w-4xl mx-auto space-y-6">
+      <header class="text-center">
+        <h1 class="text-3xl font-bold text-slate-800">
+          Medical Assistant Transcriber
+        </h1>
+        <p class="text-slate-500">
+          Real-time streaming with Multi-speaker support
+        </p>
+      </header>
+
+      <div class="flex justify-center gap-4">
+        <button
+          id="startBtn"
+          class="bg-blue-600 text-white px-6 py-2 rounded-full font-semibold hover:bg-blue-700 transition"
+        >
+          Start Consultation
+        </button>
+        <button
+          id="stopBtn"
+          class="bg-red-500 text-white px-6 py-2 rounded-full font-semibold hover:bg-red-600 transition hidden"
+        >
+          End & Summarize
+        </button>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div
+          class="bg-white p-6 rounded-xl shadow-sm border border-slate-200 min-h-[400px]"
+        >
+          <h2 class="font-bold text-slate-700 mb-4 border-b pb-2">
+            Live Transcript
+          </h2>
+          <div
+            id="transcript"
+            class="text-slate-600 leading-relaxed whitespace-pre-wrap h-[300px] overflow-y-auto"
+          ></div>
+        </div>
+
+        <div
+          class="bg-white p-6 rounded-xl shadow-sm border border-slate-200 min-h-[400px]"
+        >
+          <h2 class="font-bold text-slate-700 mb-4 border-b pb-2">
+            Clinical Summary
+          </h2>
+          <div id="summary" class="text-sm text-slate-600 space-y-2 italic">
+            Waiting for enough data to summarize...
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+    let socket; // Declared but undefined until 'Start' is clicked
+    let audioContext;
+    let processor;
+    let input;
+    let globalStream;
+
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const transcriptDiv = document.getElementById('transcript');
+    const summaryDiv = document.getElementById('summary');
+
+    async function startRecording() {
+        const consultationId = "doc-" + Math.random().toString(36).substring(7);
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        
+        // 1. Initialize the socket here
+        socket = new WebSocket(`${protocol}//${window.location.host}/ws/transcribe/${consultationId}`);
+
+        // 2. DEFINE ALL HANDLERS HERE (Immediately after creation)
+        socket.onopen = () => {
+            console.log("Connected");
+            transcriptDiv.innerText = "Listening...";
+        };
+
+        socket.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            
+            if (data.type === 'interim') {
+                transcriptDiv.innerText = data.transcript;
+                transcriptDiv.scrollTop = transcriptDiv.scrollHeight;
+            } 
+            else if (data.type === 'summary') {
+                renderSummary(data.summary);
+                // We got what we needed, now we can safely close
+                socket.close();
+            }
+        };
+
+        socket.onerror = (err) => console.error("Socket Error:", err);
+
+        // 3. Start Audio Logic
+        try {
+            globalStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+            input = audioContext.createMediaStreamSource(globalStream);
+            processor = audioContext.createScriptProcessor(4096, 1, 1);
+            
+            processor.onaudioprocess = (e) => {
+                const left = e.inputBuffer.getChannelData(0);
+                const pcm16 = convertTo16Bit(left);
+                if (socket && socket.readyState === WebSocket.OPEN) {
+                    socket.send(pcm16);
+                }
+            };
+
+            input.connect(processor);
+            processor.connect(audioContext.destination);
+
+            startBtn.classList.add('hidden');
+            stopBtn.classList.remove('hidden');
+        } catch (err) {
+            alert("Microphone access required.");
+        }
+    }
+
+    function stopRecording() {
+        // Stop the mic
+        if (processor) processor.disconnect();
+        if (input) input.disconnect();
+        if (globalStream) globalStream.getTracks().forEach(track => track.stop());
+
+        // Send 'end' signal to backend to trigger the Gemini summary
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: "end_session" }));
+            
+            summaryDiv.innerHTML = `
+                <div class="flex items-center gap-2 text-blue-600 font-semibold italic">
+                    <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600"></div>
+                    Generating final clinical summary...
+                </div>`;
+        }
+
+        startBtn.classList.remove('hidden');
+        stopBtn.classList.add('hidden');
+    }
+
+    // Helper: Float32 to Int16 PCM
+    function convertTo16Bit(buffer) {
+        let l = buffer.length;
+        let buf = new Int16Array(l);
+        while (l--) {
+            buf[l] = Math.max(-1, Math.min(1, buffer[l])) * 0x7FFF;
+        }
+        return buf.buffer;
+    }
+
+    function renderSummary(summaryData) {
+        const data = typeof summaryData === 'string' ? JSON.parse(summaryData) : summaryData;
+        summaryDiv.innerHTML = Object.entries(data).map(([key, value]) => {
+            if (!Array.isArray(value) || value.length === 0) return '';
+            return `
+                <div class="mb-4 text-left">
+                    <h3 class="font-bold capitalize text-blue-800 text-sm mb-1">${key}</h3>
+                    <ul class="list-disc ml-5 space-y-1">
+                        ${value.map(item => `<li class="text-slate-700">${item}</li>`).join('')}
+                    </ul>
+                </div>`;
+        }).join('');
+    }
+
+    startBtn.onclick = startRecording;
+    stopBtn.onclick = stopRecording;
+</script>
+  </body>
+</html>
